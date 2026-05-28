@@ -331,7 +331,7 @@ local function preview_lines(item)
             lines = { "Unable to read file" }
         end
 
-        if filetype == "" then
+        if filetype == "" and vim.filetype and vim.filetype.match then
             local matched = vim.filetype.match({ filename = item.name })
             filetype = matched or ""
         end
