@@ -433,7 +433,11 @@ local function render_list(state)
         return
     end
 
-    local prompt = "Search: /" .. (state.query or "")
+    local prompt = ""
+    if state.searching or state.query ~= "" then
+        prompt = "/" .. (state.query or "")
+    end
+
     if state.searching then
         prompt = prompt .. "_"
     end
@@ -545,6 +549,81 @@ local function move_selection(state, delta)
     render(state)
 end
 
+local function delete_buffers(state, bufnrs)
+    local seen = {}
+    local delete_set = {}
+    local unique_bufnrs = {}
+    local deleted = 0
+    local errors = {}
+    local replacement_buf = nil
+
+    for _, bufnr in ipairs(bufnrs) do
+        if is_valid_buf(bufnr) and not delete_set[bufnr] then
+            delete_set[bufnr] = true
+            table.insert(unique_bufnrs, bufnr)
+        end
+    end
+
+    local function replacement()
+        if replacement_buf and is_valid_buf(replacement_buf) and not delete_set[replacement_buf] then
+            return replacement_buf
+        end
+
+        for _, info in ipairs(vim.fn.getbufinfo({ buflisted = 1 })) do
+            local candidate = info.bufnr
+
+            if is_valid_buf(candidate)
+                and not delete_set[candidate]
+                and candidate ~= state.list_buf
+                and candidate ~= state.preview_buf
+            then
+                replacement_buf = candidate
+                return replacement_buf
+            end
+        end
+
+        replacement_buf = vim.api.nvim_create_buf(true, false)
+        return replacement_buf
+    end
+
+    for _, bufnr in ipairs(unique_bufnrs) do
+        if not seen[bufnr] then
+            seen[bufnr] = true
+
+            if get_buf_option(bufnr, "modified", false) then
+                table.insert(errors, string.format("Buffer %d has unsaved changes", bufnr))
+            else
+                for _, win in ipairs(vim.fn.win_findbuf(bufnr)) do
+                    if is_valid_win(win) and win ~= state.list_win and win ~= state.preview_win then
+                        local target = replacement()
+
+                        if target and target ~= bufnr then
+                            pcall(vim.api.nvim_win_set_buf, win, target)
+                        end
+                    end
+                end
+
+                local ok, err = pcall(vim.api.nvim_buf_delete, bufnr, { force = false })
+
+                if ok and vim.fn.buflisted(bufnr) == 0 then
+                    deleted = deleted + 1
+                else
+                    table.insert(errors, string.format("Buffer %d: %s", bufnr, err or "could not delete buffer"))
+                end
+            end
+        end
+    end
+
+    if deleted > 0 then
+        refresh_buffers(state, false)
+        render(state)
+    end
+
+    if #errors > 0 then
+        vim.notify(table.concat(errors, "\n"), vim.log.levels.WARN, { title = "buffer-menu.nvim" })
+    end
+end
+
 local function open_selected(state)
     local item = current_item(state)
     if not item or not is_valid_buf(item.bufnr) then
@@ -568,15 +647,44 @@ local function delete_selected(state)
         return
     end
 
-    local ok, err = pcall(vim.api.nvim_buf_delete, item.bufnr, { force = false })
+    delete_buffers(state, { item.bufnr })
+end
 
-    if not ok then
-        vim.notify(err, vim.log.levels.WARN, { title = "buffer-menu.nvim" })
+local function delete_line_range(state, start_line, end_line)
+    if #state.filtered == 0 then
         return
     end
 
-    refresh_buffers(state, false)
-    render(state)
+    if start_line > end_line then
+        start_line, end_line = end_line, start_line
+    end
+
+    local list_height = math.max(1, state.layout.height - 1)
+    start_line = math.max(1, start_line)
+    end_line = math.min(list_height, end_line)
+
+    if start_line > end_line then
+        return
+    end
+
+    local bufnrs = {}
+    local first_index = state.list_offset + start_line - 1
+
+    for line = start_line, end_line do
+        local index = state.list_offset + line - 1
+        local item = state.filtered[index]
+
+        if item then
+            table.insert(bufnrs, item.bufnr)
+        end
+    end
+
+    if #bufnrs == 0 then
+        return
+    end
+
+    state.selected = first_index
+    delete_buffers(state, bufnrs)
 end
 
 local function redraw_search(state)
@@ -636,6 +744,10 @@ end
 local function set_keymaps(state)
     local opts = { buffer = state.list_buf, nowait = true, silent = true }
 
+    vim.api.nvim_buf_create_user_command(state.list_buf, "BufferMenuDeleteVisual", function(command)
+        delete_line_range(state, command.line1, command.line2)
+    end, { range = true, desc = "Delete selected buffers from buffer-menu.nvim" })
+
     vim.keymap.set("n", "q", function()
         close_state(state)
     end, opts)
@@ -681,6 +793,8 @@ local function set_keymaps(state)
     vim.keymap.set("n", "dd", function()
         delete_selected(state)
     end, opts)
+
+    vim.keymap.set("x", "d", ":BufferMenuDeleteVisual<CR>", opts)
 
     vim.keymap.set("n", "<C-r>", function()
         refresh_buffers(state, false)

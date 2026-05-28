@@ -39,4 +39,5 @@ The plugin also provides `:BufferMenu`.
 | `/` | Enter search mode |
 | `<CR>` | Open selected buffer |
 | `dd` | Delete selected buffer |
+| Visual `d` | Delete selected buffers |
 | `q` / `<Esc>` | Close |
