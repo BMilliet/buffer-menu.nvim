@@ -66,6 +66,7 @@ local function setup_highlights()
         BufferMenuPromptActive = { link = "IncSearch" },
         BufferMenuCurrent = { link = "Identifier" },
         BufferMenuEmpty = { link = "Comment" },
+        BufferMenuMatch = { link = "Search" },
     }
 
     for group, spec in pairs(highlights) do
@@ -98,6 +99,22 @@ local function truncate_display(text, max_width)
     end
 
     return truncated .. "..."
+end
+
+local function truncate_display_for_query(text, max_width, query)
+    query = vim.trim((query or ""):lower())
+
+    if query == "" or vim.fn.strdisplaywidth(text) <= max_width then
+        return truncate_display(text, max_width)
+    end
+
+    local match_start = text:lower():find(query, 1, true)
+
+    if not match_start or match_start == 1 or max_width <= 6 then
+        return truncate_display(text, max_width)
+    end
+
+    return "..." .. truncate_display(text:sub(match_start), max_width - 3)
 end
 
 local function set_lines(buf, lines)
@@ -378,7 +395,37 @@ local function item_line(state, item)
     local prefix = string.format("%s %3d %s ", current, item.bufnr, modified)
     local name_width = state.layout.list_width - vim.fn.strdisplaywidth(prefix) - 1
 
-    return prefix .. truncate_display(item.display, name_width)
+    return prefix .. truncate_display_for_query(item.display, name_width, state.query)
+end
+
+local function add_match_highlights(buf, line_index, line, query)
+    query = vim.trim((query or ""):lower())
+
+    if query == "" then
+        return
+    end
+
+    local lower_line = line:lower()
+    local start_col = 1
+
+    while true do
+        local match_start, match_end = lower_line:find(query, start_col, true)
+
+        if not match_start then
+            break
+        end
+
+        vim.api.nvim_buf_add_highlight(
+            buf,
+            namespace,
+            "BufferMenuMatch",
+            line_index,
+            match_start - 1,
+            match_end
+        )
+
+        start_col = match_end + 1
+    end
 end
 
 local function render_list(state)
@@ -391,40 +438,87 @@ local function render_list(state)
         prompt = prompt .. "_"
     end
 
-    local lines = { prompt, "" }
+    local list_height = math.max(1, state.layout.height - 1)
+    local visible_items = {}
+    local lines = {}
 
     if #state.filtered == 0 then
         table.insert(lines, "  No buffers")
     else
-        for _, item in ipairs(state.filtered) do
-            table.insert(lines, item_line(state, item))
+        state.list_offset = state.list_offset or 1
+
+        if state.selected < state.list_offset then
+            state.list_offset = state.selected
+        elseif state.selected > state.list_offset + list_height - 1 then
+            state.list_offset = state.selected - list_height + 1
+        end
+
+        local max_offset = math.max(1, #state.filtered - list_height + 1)
+        state.list_offset = math.min(math.max(1, state.list_offset), max_offset)
+
+        local last = math.min(#state.filtered, state.list_offset + list_height - 1)
+
+        for index = state.list_offset, last do
+            local item = state.filtered[index]
+            local line = item_line(state, item)
+
+            table.insert(lines, line)
+            table.insert(visible_items, {
+                index = index,
+                item = item,
+                line = line,
+                line_index = #lines - 1,
+            })
         end
     end
+
+    while #lines < list_height do
+        table.insert(lines, "")
+    end
+
+    table.insert(lines, prompt)
 
     set_lines(state.list_buf, lines)
 
     vim.api.nvim_buf_clear_namespace(state.list_buf, namespace, 0, -1)
+
+    local prompt_line = #lines - 1
+
     vim.api.nvim_buf_add_highlight(
         state.list_buf,
         namespace,
         state.searching and "BufferMenuPromptActive" or "BufferMenuPrompt",
-        0,
+        prompt_line,
         0,
         -1
     )
 
     if #state.filtered == 0 then
-        vim.api.nvim_buf_add_highlight(state.list_buf, namespace, "BufferMenuEmpty", 2, 0, -1)
+        vim.api.nvim_buf_add_highlight(state.list_buf, namespace, "BufferMenuEmpty", 0, 0, -1)
     else
-        for index, item in ipairs(state.filtered) do
-            if item.bufnr == state.origin_buf then
-                vim.api.nvim_buf_add_highlight(state.list_buf, namespace, "BufferMenuCurrent", index + 1, 0, -1)
+        for _, visible in ipairs(visible_items) do
+            if visible.item.bufnr == state.origin_buf then
+                vim.api.nvim_buf_add_highlight(
+                    state.list_buf,
+                    namespace,
+                    "BufferMenuCurrent",
+                    visible.line_index,
+                    0,
+                    -1
+                )
             end
+
+            add_match_highlights(state.list_buf, visible.line_index, visible.line, state.query)
         end
     end
 
     if is_valid_win(state.list_win) then
-        local cursor_line = #state.filtered == 0 and 3 or state.selected + 2
+        local cursor_line = prompt_line + 1
+
+        if not state.searching then
+            cursor_line = #state.filtered == 0 and 1 or state.selected - state.list_offset + 1
+        end
+
         cursor_line = math.min(cursor_line, #lines)
         pcall(vim.api.nvim_win_set_cursor, state.list_win, { cursor_line, 0 })
     end

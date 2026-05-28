@@ -2,9 +2,10 @@
 
 A small floating buffer picker for Neovim.
 
-It opens a two-pane popup: the left pane lists buffers and the right pane
-previews the selected buffer. Typing does not filter by default; press `/` to
-enter search mode, type the filter, then press `<CR>`.
+It opens a two-pane popup: the left pane lists buffers with a search line at
+the bottom and the right pane previews the selected buffer. Typing does not
+filter by default; press `/` to enter search mode, type the filter, then press
+`<CR>`. Matching text is highlighted in the buffer list.
 
 ## Installation
 
